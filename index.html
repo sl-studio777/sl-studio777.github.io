@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- アプリのように全画面表示させるための設定を追加 -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>ESCAPE & SEARCH</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+            touch-action: manipulation;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        /* ---------------------------------
+           画面表示の制御（重なりバグ防止の徹底）
+           --------------------------------- */
+        .screen-layer {
+            display: none !important; /* 他のどのクラスよりも優先して非表示 */
+            flex-direction: column;
+            min-height: 100vh;
+        }
+        .screen-layer.active {
+            display: flex !important; /* active時のみ確実に表示 */
+        }
+
+        /* ---------------------------------
+           ラウンドボード（ターン表示・折り返し対応）
+           --------------------------------- */
+        .round-board-container {
+            display: flex;
+            flex-wrap: wrap; /* 端まで行ったら自動で改行させる */
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            padding: 16px;
+        }
+
+        .round-token {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 44px; /* 全てのトークンが収まるように少しコンパクトに */
+            opacity: 0.3;
+            filter: grayscale(100%);
+            transition: all 0.3s ease;
+        }
+
+        .round-token.active {
+            opacity: 1;
+            filter: grayscale(0%);
+            transform: scale(1.15); /* 現在ターンは少し拡大 */
+            animation: pulse-token 1.5s infinite;
+            z-index: 10;
+        }
+
+        .round-token.past {
+            opacity: 1;
+            filter: grayscale(0%);
+        }
+
+        .round-number {
+            font-size: 14px;
+            color: #9ca3af;
+            margin-top: 6px;
+            font-weight: bold;
+            line-height: 1;
+        }
+
+        .round-token.active .round-number,
+        .round-token.past .round-number {
+            color: #ffffff;
+        }
+
+        @keyframes pulse-token {
+            0% { transform: scale(1.1); }
+            50% { transform: scale(1.25); }
+            100% { transform: scale(1.1); }
+        }
+
+        /* ---------------------------------
+           盤面・ビル・痕跡
+           --------------------------------- */
+        .board-container {
+            width: 100%;
+            max-width: 400px;
+            margin: 0 auto;
+            background-color: #94a3b8;
+            padding: 12px;
+            border-radius: 12px;
+            position: relative;
+        }
+
+        /* ビルを綺麗に並べるグリッド */
+        .grid-board {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            grid-template-rows: repeat(5, 1fr);
+            gap: 12px;
+            width: 100%;
+        }
+
+        .building {
+            background-color: #334155;
+            border-radius: 8px;
+            aspect-ratio: 1 / 1;
+            box-shadow: inset 0 -4px 0 rgba(0,0,0,0.3);
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .building.highlight-search {
+            outline: 4px solid #ef4444;
+            outline-offset: -2px;
+            transform: scale(1.05);
+            z-index: 5;
+            box-shadow: 0 0 15px rgba(239, 68, 68, 0.5);
+        }
+
+        .building.highlight-move {
+            outline: 4px solid #3b82f6;
+            outline-offset: -2px;
+            transform: scale(1.05);
+            z-index: 5;
+        }
+
+        .building.searched-empty {
+            opacity: 0.4;
+            filter: grayscale(30%);
+        }
+
+        /* 痕跡マーク */
+        .trace-mark {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.4);
+            position: relative;
+        }
+        /* ビル内の痕跡は中央に */
+        .building .trace-mark {
+            position: absolute;
+            width: 80%;
+            height: 80%;
+            font-size: 28px;
+        }
+
+        /* 色設定 (1=黄, 6=赤, 他=青) */
+        .trace-yellow { background: linear-gradient(135deg, #fde047, #eab308); border: 2px solid #ca8a04; color: #422006; }
+        .trace-red    { background: linear-gradient(135deg, #fca5a5, #ef4444); border: 2px solid #b91c1c; color: #450a0a; }
+        .trace-blue   { background: linear-gradient(135deg, #93c5fd, #3b82f6); border: 2px solid #1d4ed8; color: #172554; }
+
+        /* 車（犯人の現在地）- Flexboxによる中央配置に修正 */
+        .car-mark {
+            font-size: 32px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 20;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+
+        /* ---------------------------------
+           交差点とヘリコプター
+           --------------------------------- */
+        .intersections-layer {
+            position: absolute;
+            top: 12px; left: 12px; right: 12px; bottom: 12px;
+            pointer-events: none;
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            grid-template-rows: repeat(5, 1fr);
+            gap: 12px;
+        }
+
+        .intersection-cell {
+            position: relative;
+        }
+
+        /* マスの右下角に正確に配置 */
+        .intersection-point {
+            position: absolute;
+            width: 48px;
+            height: 48px;
+            bottom: -6px;
+            right: -6px;
+            transform: translate(50%, 50%);
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.95);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.4);
+            pointer-events: auto;
+            cursor: pointer;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 24px;
+            transition: all 0.2s;
+            border: 4px solid transparent;
+        }
+
+        /* ヘリコプターの個別色 */
+        .heli-0 { border-color: #ef4444; background-color: #fee2e2; } /* 赤 */
+        .heli-1 { border-color: #3b82f6; background-color: #dbeafe; } /* 青 */
+        .heli-2 { border-color: #10b981; background-color: #d1fae5; } /* 緑 */
+
+        .intersection-point.has-heli { z-index: 20; }
+        .intersection-point.selected {
+            transform: translate(50%, 50%) scale(1.25);
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.9);
+            border-color: #2563eb;
+            z-index: 30;
+        }
+        .intersection-point.acted {
+            opacity: 0.5;
+            filter: grayscale(70%);
+        }
+        .intersection-point.valid-move {
+            background-color: rgba(255, 255, 255, 0.5);
+            border: 3px dashed #3b82f6;
+            z-index: 10;
+        }
+
+        @keyframes floatUpFade {
+            0% { transform: translateY(0) scale(0.5); opacity: 0; }
+            20% { transform: translateY(-10px) scale(1.2); opacity: 1; }
+            100% { transform: translateY(-40px) scale(1); opacity: 0; }
+        }
+    </style>
+</head>
+<body class="text-gray-800">
+
+<div id="app" class="max-w-md mx-auto bg-gray-100 min-h-screen relative shadow-lg">
+    
+    <!-- 画面1: ゲームプレイ画面 -->
+    <div id="screen-game" class="screen-layer active p-4">
+        <!-- ヘッダー -->
+        <div class="bg-gray-900 text-white p-3 text-center rounded-t-xl shadow-md z-10 mb-2">
+            <h1 class="text-lg font-bold tracking-wider">ESCAPE & SEARCH</h1>
+            <div id="header-status" class="text-sm text-gray-300 mt-1">準備フェーズ</div>
+        </div>
+
+        <!-- ラウンドボード (折り返し設定で全て表示) -->
+        <div class="w-full mb-4 bg-gray-800 rounded-lg shadow-inner">
+            <div id="round-board-container" class="round-board-container">
+                <!-- JSでターンアイコンを生成 -->
+            </div>
+        </div>
+
+        <!-- 状態メッセージ -->
+        <div id="status-message" class="bg-blue-50 border-l-4 border-blue-500 text-blue-700 p-3 mb-6 rounded shadow-sm text-sm font-medium">
+            メッセージ
+        </div>
+
+        <!-- 盤面エリア -->
+        <div class="board-container" id="board">
+            <div class="grid-board" id="buildings-layer">
+                <!-- ビル生成 -->
+            </div>
+            <div class="intersections-layer" id="intersections-layer">
+                <!-- 交差点生成 -->
+            </div>
+        </div>
+
+        <!-- 警察アクションボタン群（十分な余白を設定） -->
+        <div id="police-actions" class="hidden flex-col gap-4 mt-8 w-full pb-8">
+            <div class="flex gap-4">
+                <button id="btn-heli-move" class="flex-1 bg-indigo-600 text-white font-bold py-4 px-2 rounded-xl shadow-lg disabled:opacity-50 transition transform active:scale-95">移動する</button>
+                <button id="btn-heli-search" class="flex-1 bg-rose-600 text-white font-bold py-4 px-2 rounded-xl shadow-lg disabled:opacity-50 transition transform active:scale-95">捜索する</button>
+            </div>
+            <button id="btn-end-turn-police" class="w-full bg-gray-800 text-white font-bold py-4 px-4 rounded-xl shadow-lg transition transform active:scale-95">ターン終了</button>
+        </div>
+    </div>
+
+    <!-- 画面2: ターン切り替えクッション画面 -->
+    <div id="screen-transition" class="screen-layer bg-gray-900 text-white justify-center items-center p-6">
+        <h2 id="transition-title" class="text-3xl font-bold mb-4 text-center">警察のターン</h2>
+        <p id="transition-desc" class="text-gray-400 mb-12 text-center">画面を相手に見せないようにしてください</p>
+        <button id="btn-ready" class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 px-12 rounded-full shadow-lg text-xl transition transform hover:scale-105">
+            準備完了
+        </button>
+    </div>
+
+    <!-- 画面3: リザルト画面 -->
+    <div id="screen-result" class="screen-layer bg-gray-900 text-white justify-center items-center p-6">
+        <h2 id="result-title" class="text-4xl font-bold mb-4 text-center">YOU WIN</h2>
+        <p id="result-desc" class="text-xl mb-12 text-center">〇〇の勝利です</p>
+        <button onclick="location.reload()" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-8 rounded-full shadow-lg text-xl transition transform hover:scale-105">
+            もう一度遊ぶ
+        </button>
+    </div>
+
+</div>
+
+<script>
+    const MAX_TURNS = 11;
+    const BOARD_SIZE = 5;
+    
+    // 状態管理
+    const state = {
+        phase: 'setup_police', // setup_police -> setup_criminal -> play
+        turn: 1,               // プレイフェーズ開始時に1からスタート
+        activeRole: 'police',  // police / criminal
+        helicopters: [],       // { id, r, c, hasActed }
+        criminalPos: null,     // 犯人の現在地 index (0-24)
+        traceHistory: [],      // [初期位置, ターン1移動先, ターン2移動先...]
+        buildings: Array(25).fill(null).map(() => ({ searchedEmpty: false, traceTurn: null })),
+        selectedHeliId: null,
+        actionMode: null,      // 'move' / 'select_search_target'
+        isTransitioning: false
+    };
+
+    const els = {
+        game: document.getElementById('screen-game'),
+        board: document.getElementById('board'),
+        bLayer: document.getElementById('buildings-layer'),
+        iLayer: document.getElementById('intersections-layer'),
+        headerStatus: document.getElementById('header-status'),
+        msg: document.getElementById('status-message'),
+        policeActions: document.getElementById('police-actions'),
+        btnHeliMove: document.getElementById('btn-heli-move'),
+        btnHeliSearch: document.getElementById('btn-heli-search'),
+        btnEndTurn: document.getElementById('btn-end-turn-police'),
+        roundBoardContainer: document.getElementById('round-board-container'),
+    };
+
+    function init() {
+        createRoundBoard();
+        createBuildings();
+        createIntersections();
+        updateUI();
+    }
+
+    function createRoundBoard() {
+        els.roundBoardContainer.innerHTML = '';
+        for (let i = 1; i <= MAX_TURNS; i++) {
+            const tokenContainer = document.createElement('div');
+            tokenContainer.className = 'round-token';
+            tokenContainer.id = `round-token-${i}`;
+
+            let colorClass = 'trace-blue';
+            if (i === 1) colorClass = 'trace-yellow';
+            else if (i === 6) colorClass = 'trace-red';
+
+            const mark = document.createElement('div');
+            mark.className = `trace-mark ${colorClass}`;
+            mark.innerHTML = '👣';
+
+            const num = document.createElement('div');
+            num.className = 'round-number';
+            num.innerText = i;
+
+            tokenContainer.appendChild(mark);
+            tokenContainer.appendChild(num);
+            els.roundBoardContainer.appendChild(tokenContainer);
+        }
+    }
+
+    function createBuildings() {
+        els.bLayer.innerHTML = '';
+        for (let i = 0; i < 25; i++) {
+            const b = document.createElement('div');
+            b.className = 'building';
+            b.id = `bldg-${i}`;
+            b.onclick = () => onBuildingClick(i);
+            els.bLayer.appendChild(b);
+        }
+    }
+
+    function createIntersections() {
+        els.iLayer.innerHTML = '';
+        for (let r = 0; r < BOARD_SIZE; r++) {
+            for (let c = 0; c < BOARD_SIZE; c++) {
+                const cell = document.createElement('div');
+                cell.className = 'intersection-cell';
+                
+                // 右下角に交差点を配置（外周を除く4x4）
+                if (r < BOARD_SIZE - 1 && c < BOARD_SIZE - 1) {
+                    const inter = document.createElement('div');
+                    inter.className = 'intersection-point';
+                    inter.id = `inter-${r}-${c}`;
+                    inter.onclick = () => onIntersectionClick(r, c);
+                    cell.appendChild(inter);
+                }
+                els.iLayer.appendChild(cell);
+            }
+        }
+    }
+
+    function showScreen(screenId) {
+        document.querySelectorAll('.screen-layer').forEach(el => {
+            el.classList.remove('active');
+        });
+        document.getElementById(screenId).classList.add('active');
+    }
+
+    function updateUI() {
+        // ラウンドボードの更新 (準備フェーズ中は光らせない)
+        for (let i = 1; i <= MAX_TURNS; i++) {
+            const token = document.getElementById(`round-token-${i}`);
+            token.className = 'round-token'; 
+            if (state.phase === 'play') {
+                if (i === state.turn) token.classList.add('active');
+                else if (i < state.turn) token.classList.add('past');
+            }
+        }
+
+        // ビルの描画更新
+        for (let i = 0; i < 25; i++) {
+            const b = document.getElementById(`bldg-${i}`);
+            b.className = 'building';
+            b.innerHTML = '';
+
+            const bData = state.buildings[i];
+            
+            // 警察視点：捜索済み(空)
+            if (bData.searchedEmpty && state.activeRole === 'police') {
+                b.classList.add('searched-empty');
+            }
+
+            // 犯人視点：痕跡と車を可視化
+            if (state.activeRole === 'criminal') {
+                const traceTurnIndex = state.traceHistory.indexOf(i);
+                
+                if (i === state.criminalPos) {
+                    // 現在位置に車を描画
+                    const car = document.createElement('div');
+                    car.className = 'car-mark';
+                    car.innerText = '🚗';
+                    b.appendChild(car);
+                } else if (traceTurnIndex !== -1) {
+                    // 過去にいた位置に痕跡を描画 (Turn1開始時の場所=Yellow)
+                    addTraceMark(b, traceTurnIndex + 1);
+                }
+            } 
+            // 警察視点：発見された痕跡のみ表示
+            else {
+                if (bData.traceTurn) {
+                    addTraceMark(b, bData.traceTurn);
+                }
+            }
+
+            // ハイライト表示
+            if (state.activeRole === 'criminal' && state.phase === 'play') {
+                if (getValidCriminalMoves().includes(i)) b.classList.add('highlight-move');
+            }
+            if (state.activeRole === 'police' && state.actionMode === 'select_search_target') {
+                const h = state.helicopters.find(x => x.id === state.selectedHeliId);
+                if (h && getSearchableBuildings(h.r, h.c).includes(i)) b.classList.add('highlight-search');
+            }
+        }
+
+        // 交差点（ヘリ）の描画更新
+        for (let r = 0; r < BOARD_SIZE - 1; r++) {
+            for (let c = 0; c < BOARD_SIZE - 1; c++) {
+                const inter = document.getElementById(`inter-${r}-${c}`);
+                inter.className = 'intersection-point';
+                inter.innerHTML = '';
+                
+                const h = state.helicopters.find(x => x.r === r && x.c === c);
+                if (h) {
+                    inter.classList.add('has-heli');
+                    inter.classList.add(`heli-${h.id}`);
+                    inter.innerHTML = '🚁';
+                    
+                    if (h.hasActed) inter.classList.add('acted');
+                    if (h.id === state.selectedHeliId) inter.classList.add('selected');
+                }
+
+                // 移動先のハイライト
+                if (state.actionMode === 'move' && state.selectedHeliId !== null) {
+                    const selectedH = state.helicopters.find(x => x.id === state.selectedHeliId);
+                    if (selectedH && isValidHeliMove(selectedH.r, selectedH.c, r, c)) {
+                        inter.classList.add('valid-move');
+                    }
+                }
+            }
+        }
+
+        // テキストとボタンの出し分け
+        if (state.phase === 'setup_police') {
+            els.headerStatus.innerText = '準備フェーズ (警察)';
+            els.msg.innerHTML = `<b>初期設定① ヘリコプターの配置</b><br>交差点をタップしてヘリを配置してください (${state.helicopters.length}/3)`;
+            els.policeActions.classList.add('hidden');
+            els.policeActions.classList.remove('flex');
+        } else if (state.phase === 'setup_criminal') {
+            els.headerStatus.innerText = '準備フェーズ (犯人)';
+            els.msg.innerHTML = `<b>初期設定② スタート位置の決定</b><br>隠れるビルをタップして選んでください`;
+            els.policeActions.classList.add('hidden');
+            els.policeActions.classList.remove('flex');
+        } else if (state.phase === 'play') {
+            els.headerStatus.innerText = `ラウンド ${state.turn} / ${MAX_TURNS}`;
+            if (state.activeRole === 'criminal') {
+                els.msg.innerHTML = `<b>犯人の逃走</b><br>青枠の隣接するビルを選んで移動してください<br>※過去に通ったビルには戻れません`;
+                els.policeActions.classList.add('hidden');
+                els.policeActions.classList.remove('flex');
+            } else {
+                els.policeActions.classList.remove('hidden');
+                els.policeActions.classList.add('flex');
+                
+                if (state.selectedHeliId !== null) {
+                    const h = state.helicopters.find(x => x.id === state.selectedHeliId);
+                    if (h.hasActed) {
+                        els.msg.innerHTML = 'このヘリは行動済みです';
+                        els.btnHeliMove.disabled = true;
+                        els.btnHeliSearch.disabled = true;
+                    } else if (state.actionMode === 'move') {
+                        els.msg.innerHTML = '<b>ヘリの移動</b><br>点線の交差点をタップして移動します';
+                        els.btnHeliMove.disabled = false;
+                        els.btnHeliSearch.disabled = false;
+                    } else if (state.actionMode === 'select_search_target') {
+                        els.msg.innerHTML = '<b>警察の捜索</b><br>赤枠のビルから1つ選んでタップしてください';
+                        els.btnHeliMove.disabled = false;
+                        els.btnHeliSearch.disabled = false;
+                    } else {
+                        els.msg.innerHTML = '<b>アクション選択</b><br>移動するか、周囲のビルを捜索するか選んでください';
+                        els.btnHeliMove.disabled = false;
+                        els.btnHeliSearch.disabled = false;
+                    }
+                } else {
+                    els.msg.innerHTML = '<b>警察の行動</b><br>行動させるヘリ(交差点)をタップしてください';
+                    els.btnHeliMove.disabled = true;
+                    els.btnHeliSearch.disabled = true;
+                }
+            }
+        }
+    }
+
+    function addTraceMark(parentEl, turn) {
+        const mark = document.createElement('div');
+        let colorClass = 'trace-blue';
+        if (turn === 1) colorClass = 'trace-yellow';
+        else if (turn === 6) colorClass = 'trace-red';
+        mark.className = `trace-mark ${colorClass}`;
+        mark.innerText = '👣';
+        parentEl.appendChild(mark);
+    }
+
+    function onIntersectionClick(r, c) {
+        if (state.phase === 'setup_police') {
+            if (state.helicopters.find(x => x.r === r && x.c === c)) return;
+            state.helicopters.push({ id: state.helicopters.length, r, c, hasActed: false });
+            if (state.helicopters.length >= 3) {
+                // 警察の準備完了、犯人の準備へ
+                state.phase = 'setup_criminal';
+                switchTurn('criminal', true);
+            } else {
+                updateUI();
+            }
+        } else if (state.phase === 'play' && state.activeRole === 'police') {
+            const h = state.helicopters.find(x => x.r === r && x.c === c);
+            if (state.actionMode === 'move' && state.selectedHeliId !== null && !h) {
+                const selectedH = state.helicopters.find(x => x.id === state.selectedHeliId);
+                if (isValidHeliMove(selectedH.r, selectedH.c, r, c)) {
+                    selectedH.r = r;
+                    selectedH.c = c;
+                    selectedH.hasActed = true;
+                    state.selectedHeliId = null;
+                    state.actionMode = null;
+                    updateUI();
+                    return;
+                }
+            }
+            if (h) {
+                state.selectedHeliId = h.id;
+                state.actionMode = null;
+                updateUI();
+            }
+        }
+    }
+
+    function isValidHeliMove(r1, c1, r2, c2) {
+        const dr = Math.abs(r1 - r2);
+        const dc = Math.abs(c1 - c2);
+        if ((dr === 1 && dc === 0) || (dr === 0 && dc === 1)) {
+            return !state.helicopters.some(x => x.r === r2 && x.c === c2);
+        }
+        return false;
+    }
+
+    function getSearchableBuildings(hr, hc) {
+        return [ hr*BOARD_SIZE+hc, hr*BOARD_SIZE+hc+1, (hr+1)*BOARD_SIZE+hc, (hr+1)*BOARD_SIZE+hc+1 ];
+    }
+
+    function getValidCriminalMoves() {
+        if (state.criminalPos === null) return [];
+        const r = Math.floor(state.criminalPos / BOARD_SIZE);
+        const c = state.criminalPos % BOARD_SIZE;
+        const moves = [];
+        const dirs = [[-1,0], [1,0], [0,-1], [0,1]];
+        for (let d of dirs) {
+            const nr = r + d[0];
+            const nc = c + d[1];
+            if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE) {
+                const idx = nr * BOARD_SIZE + nc;
+                if (!state.traceHistory.includes(idx)) moves.push(idx);
+            }
+        }
+        return moves;
+    }
+
+    function onBuildingClick(bldgIdx) {
+        if (state.isTransitioning) return;
+
+        if (state.phase === 'setup_criminal') {
+            // 初期位置を決定（痕跡履歴に登録）
+            state.criminalPos = bldgIdx;
+            state.traceHistory.push(bldgIdx);
+            state.isTransitioning = true;
+            updateUI(); 
+            
+            setTimeout(() => {
+                state.isTransitioning = false;
+                state.phase = 'play';
+                state.turn = 1; // ここで初めてラウンド1開始
+                switchTurn('police');
+            }, 800);
+        } else if (state.phase === 'play') {
+            if (state.activeRole === 'criminal') {
+                const validMoves = getValidCriminalMoves();
+                if (validMoves.includes(bldgIdx)) {
+                    state.criminalPos = bldgIdx;
+                    state.traceHistory.push(bldgIdx); // 移動前の場所が履歴として残る
+                    state.isTransitioning = true;
+                    updateUI();
+                    
+                    setTimeout(() => {
+                        state.isTransitioning = false;
+                        // 犯人が移動を終えた時点でラウンド完了
+                        state.turn++;
+                        if (state.turn > MAX_TURNS) {
+                            endGame('criminal_win', '11ラウンド逃げ切りました！');
+                        } else {
+                            switchTurn('police');
+                        }
+                    }, 800);
+                }
+            } else if (state.activeRole === 'police' && state.actionMode === 'select_search_target') {
+                const h = state.helicopters.find(x => x.id === state.selectedHeliId);
+                if (h && getSearchableBuildings(h.r, h.c).includes(bldgIdx)) {
+                    performSearch(bldgIdx);
+                }
+            }
+        }
+    }
+
+    function performSearch(bldgIdx) {
+        const h = state.helicopters.find(x => x.id === state.selectedHeliId);
+        const bldgEl = document.getElementById(`bldg-${bldgIdx}`);
+        
+        if (bldgIdx === state.criminalPos) {
+            showSearchAnim(bldgEl, '逮捕！', '#f87171');
+            setTimeout(() => endGame('police_win', '犯人の車を発見し逮捕しました！'), 1000);
+            return;
+        }
+        
+        const traceTurnIndex = state.traceHistory.indexOf(bldgIdx);
+        if (traceTurnIndex !== -1) {
+            const turnFound = traceTurnIndex + 1;
+            state.buildings[bldgIdx].traceTurn = turnFound;
+            showSearchAnim(bldgEl, '痕跡！', '#facc15');
+        } else {
+            state.buildings[bldgIdx].searchedEmpty = true;
+            showSearchAnim(bldgEl, '空', '#cbd5e1');
+        }
+
+        h.hasActed = true;
+        state.selectedHeliId = null;
+        state.actionMode = null;
+        updateUI();
+    }
+
+    function showSearchAnim(bldgEl, text, colorCode) {
+        const rect = bldgEl.getBoundingClientRect();
+        const boardRect = els.board.getBoundingClientRect();
+        
+        const anim = document.createElement('div');
+        anim.innerText = text;
+        anim.style.position = 'absolute';
+        anim.style.left = (rect.left - boardRect.left) + 'px';
+        anim.style.top = (rect.top - boardRect.top) + 'px';
+        anim.style.width = rect.width + 'px';
+        anim.style.height = rect.height + 'px';
+        anim.style.display = 'flex';
+        anim.style.justifyContent = 'center';
+        anim.style.alignItems = 'center';
+        anim.style.color = colorCode;
+        anim.style.fontSize = '32px';
+        anim.style.fontWeight = 'bold';
+        anim.style.zIndex = '100';
+        anim.style.pointerEvents = 'none';
+        anim.style.animation = 'floatUpFade 1.2s ease-out forwards';
+        anim.style.textShadow = '0 2px 4px rgba(0,0,0,0.8)';
+        
+        els.board.appendChild(anim);
+        setTimeout(() => anim.remove(), 1200);
+    }
+
+    function switchTurn(nextRole, isSetup = false) {
+        state.activeRole = nextRole;
+        state.selectedHeliId = null;
+        state.actionMode = null;
+        
+        state.buildings.forEach(b => b.searchedEmpty = false);
+        
+        if (nextRole === 'police') {
+            state.helicopters.forEach(h => h.hasActed = false);
+            const moves = getValidCriminalMoves();
+            if (state.phase === 'play' && moves.length === 0) {
+                endGame('police_win', '犯人が移動できる場所がなくなり包囲されました！');
+                return;
+            }
+        }
+
+        document.getElementById('transition-title').innerText = nextRole === 'police' ? '警察のターン' : '犯人のターン';
+        showScreen('screen-transition');
+    }
+
+    els.btnHeliMove.onclick = () => {
+        const h = state.helicopters.find(x => x.id === state.selectedHeliId);
+        if (!h || h.hasActed) return;
+        state.actionMode = state.actionMode === 'move' ? null : 'move';
+        updateUI();
+    };
+
+    els.btnHeliSearch.onclick = () => {
+        const h = state.helicopters.find(x => x.id === state.selectedHeliId);
+        if (!h || h.hasActed) return;
+        state.actionMode = state.actionMode === 'select_search_target' ? null : 'select_search_target';
+        updateUI();
+    };
+
+    els.btnEndTurn.onclick = () => {
+        if (state.activeRole === 'police' && state.phase === 'play') switchTurn('criminal');
+    };
+
+    document.getElementById('btn-ready').onclick = () => {
+        showScreen('screen-game');
+        updateUI();
+    };
+
+    function endGame(result, desc) {
+        const titleEl = document.getElementById('result-title');
+        const descEl = document.getElementById('result-desc');
+        if (result === 'police_win') {
+            titleEl.innerText = '警察の勝利！';
+            titleEl.className = 'text-5xl font-bold mb-4 text-center text-blue-400';
+        } else {
+            titleEl.innerText = '犯人の勝利！';
+            titleEl.className = 'text-5xl font-bold mb-4 text-center text-red-400';
+        }
+        descEl.innerText = desc;
+        showScreen('screen-result');
+    }
+
+    init();
+</script>
+</body>
+</html>
